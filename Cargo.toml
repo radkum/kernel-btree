@@ -1,0 +1,21 @@
+[package]
+name = "kernel-btree"
+version = "0.1.0"
+edition = "2021"
+description = "Ordered map for no_std that never panics or aborts on allocation failure: atomic try_insert, allocation-free remove, builds with no_global_oom_handling."
+keywords = ["btree", "fallible", "no-std", "kernel", "allocation"]
+categories = ["data-structures", "no-std", "memory-management"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/radkum/kernel-btree"
+# not on crates.io yet
+publish = false
+
+[features]
+# BTreeMap::check_invariants, for tests
+debug-invariants = []
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
+kernel-btree = { path = ".", features = ["debug-invariants"] }
