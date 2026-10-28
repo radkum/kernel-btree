@@ -7,8 +7,27 @@
 //!
 //! A B-tree like `std::collections::BTreeMap`; all algorithms are iterative (small kernel
 //! stacks). See `docs/DESIGN.md`.
+//!
+//! ```
+//! use kernel_btree::BTreeMap;
+//!
+//! let mut map = BTreeMap::new();
+//! map.try_insert(2, "b")?;
+//! map.try_insert(1, "a")?;
+//! assert_eq!(map.get(&1), Some(&"a"));
+//! assert_eq!(map.remove(&2), Some("b"));
+//! # Ok::<(), kernel_btree::AllocError>(())
+//! ```
 #![no_std]
-#![deny(clippy::panic, clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+#![deny(
+    missing_docs,
+    unsafe_op_in_unsafe_fn,
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::undocumented_unsafe_blocks
+)]
 
 extern crate alloc;
 
@@ -26,9 +45,9 @@ use core::ops::{Bound, RangeBounds};
 use core::ptr;
 
 pub use entry::{Entry, OccupiedEntry, VacantEntry};
-use iter::{first_leaf, last_leaf, next_kv, prev_kv, successor, Pos};
 pub use iter::{IntoIter, Iter, IterMut, Keys, Range, RangeMut, Values, ValuesMut};
-use node::{NodePtr, B, CAPACITY, MIN_LEN};
+use iter::{Pos, first_leaf, last_leaf, next_kv, prev_kv, successor};
+use node::{B, CAPACITY, MIN_LEN, NodePtr};
 pub use set::BTreeSet;
 
 /// Allocation failed; the map was not modified.
@@ -45,7 +64,9 @@ impl core::error::Error for AllocError {}
 
 /// Allocation failed; the map was not modified and the pair is handed back.
 pub struct InsertError<K, V> {
+    /// The key that could not be inserted.
     pub key: K,
+    /// The value that could not be inserted.
     pub value: V,
 }
 
@@ -69,6 +90,32 @@ impl<K, V> core::error::Error for InsertError<K, V> {}
 ///
 /// `alloc` returns null or a block valid for `layout` until it is passed to `dealloc` of the
 /// same allocator. Neither method may panic.
+///
+/// ```
+/// use core::alloc::Layout;
+/// use kernel_btree::{BTreeMap, RawAlloc};
+///
+/// struct Pool;
+///
+/// // SAFETY: forwards to the global allocator, like `kernel_btree::Global`
+/// unsafe impl RawAlloc for Pool {
+///     fn alloc(&self, layout: Layout) -> *mut u8 {
+///         if layout.size() == 0 {
+///             return core::ptr::null_mut();
+///         }
+///         // SAFETY: `layout` is not zero-sized
+///         unsafe { std::alloc::alloc(layout) }
+///     }
+///
+///     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+///         // SAFETY: `ptr` came from `alloc` above with the same `layout`
+///         unsafe { std::alloc::dealloc(ptr, layout) }
+///     }
+/// }
+///
+/// let mut map: BTreeMap<u32, u32, Pool> = BTreeMap::new_in(Pool);
+/// assert!(map.try_insert(1, 1).is_ok());
+/// ```
 pub unsafe trait RawAlloc {
     /// Returns null on failure. The map never asks for a zero-sized layout.
     fn alloc(&self, layout: Layout) -> *mut u8;
@@ -94,7 +141,8 @@ unsafe impl RawAlloc for Global {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        alloc::alloc::dealloc(ptr, layout);
+        // SAFETY: the caller guarantees `ptr` came from `alloc` above with the same `layout`
+        unsafe { alloc::alloc::dealloc(ptr, layout) };
     }
 }
 
@@ -105,10 +153,25 @@ unsafe impl<A: RawAlloc + ?Sized> RawAlloc for &A {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        (**self).dealloc(ptr, layout);
+        // SAFETY: forwards the caller's guarantee to `A`
+        unsafe { (**self).dealloc(ptr, layout) };
     }
 }
 
+/// An ordered map backed by a B-tree.
+///
+/// All allocating operations are fallible; see [`try_insert`](Self::try_insert),
+/// [`try_clone`](Self::try_clone) and the `try_*` entry methods. [`Global`] is the default
+/// node allocator, [`new_in`](Self::new_in) selects another [`RawAlloc`].
+///
+/// ```
+/// use kernel_btree::BTreeMap;
+///
+/// let mut map = BTreeMap::new();
+/// assert!(map.try_insert("a", 1).is_ok());
+/// assert!(map.try_insert("b", 2).is_ok());
+/// assert_eq!(map.keys().copied().collect::<Vec<_>>(), ["a", "b"]);
+/// ```
 pub struct BTreeMap<K, V, A: RawAlloc = Global> {
     // null when empty; `*const` keeps `K`/`V` covariant
     root: *const node::LeafNode<K, V>,
@@ -120,6 +183,7 @@ pub struct BTreeMap<K, V, A: RawAlloc = Global> {
 
 // SAFETY: the map owns its nodes exclusively, like a `Box`
 unsafe impl<K: Send, V: Send, A: RawAlloc + Send> Send for BTreeMap<K, V, A> {}
+// SAFETY: shared access only hands out shared references to keys and values; the allocator is `Sync`
 unsafe impl<K: Sync, V: Sync, A: RawAlloc + Sync> Sync for BTreeMap<K, V, A> {}
 
 impl<K: Ord, V> BTreeMap<K, V> {
@@ -135,14 +199,17 @@ impl<K: Ord, V, A: RawAlloc> BTreeMap<K, V, A> {
         Self { root: ptr::null(), height: 0, len: 0, alloc, _marker: PhantomData }
     }
 
+    /// Returns the number of pairs.
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Returns `true` if the map contains no pairs.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// Returns a reference to the value for `key`.
     pub fn get<Q: ?Sized + Ord>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -152,6 +219,7 @@ impl<K: Ord, V, A: RawAlloc> BTreeMap<K, V, A> {
         Some(unsafe { pos.kv().1 })
     }
 
+    /// Returns a mutable reference to the value for `key`.
     pub fn get_mut<Q: ?Sized + Ord>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
@@ -161,6 +229,7 @@ impl<K: Ord, V, A: RawAlloc> BTreeMap<K, V, A> {
         Some(unsafe { pos.kv_mut().1 })
     }
 
+    /// Returns `true` if the map contains `key`.
     pub fn contains_key<Q: ?Sized + Ord>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
@@ -204,11 +273,13 @@ impl<K: Ord, V, A: RawAlloc> BTreeMap<K, V, A> {
         self.free_all();
     }
 
+    /// Returns the pair with the smallest key.
     pub fn first_key_value(&self) -> Option<(&K, &V)> {
         // SAFETY: a live pair, borrowed with `self`
         self.first_pos().map(|pos| unsafe { pos.kv() })
     }
 
+    /// Returns the pair with the largest key.
     pub fn last_key_value(&self) -> Option<(&K, &V)> {
         // SAFETY: as above
         self.last_pos().map(|pos| unsafe { pos.kv() })
@@ -223,6 +294,7 @@ impl<K: Ord, V, A: RawAlloc> BTreeMap<K, V, A> {
         Range::new(self.range_raw(range))
     }
 
+    /// Iterates mutably over the pairs in `range`. An empty or inverted range yields nothing.
     pub fn range_mut<Q: ?Sized + Ord, R: RangeBounds<Q>>(&mut self, range: R) -> RangeMut<'_, K, V>
     where
         K: Borrow<Q>,
@@ -416,44 +488,47 @@ impl<K: Ord, V, A: RawAlloc> BTreeMap<K, V, A> {
         spare_leaf: NodePtr<K, V>,
         mut spare_internals: NodePtr<K, V>,
     ) -> *mut V {
-        let mut edge: NodePtr<K, V> = ptr::null_mut();
-        // leaves never move, so the slot found at the leaf level stays valid
-        let mut slot: *mut V = ptr::null_mut();
-        loop {
-            if node::len(node) < CAPACITY {
-                node::insert_fit(node, idx, key, value, edge);
-                return if slot.is_null() { node::val(node, idx) } else { slot };
+        // SAFETY: `leaf`/`idx` is a leaf edge of this tree; the reserved nodes cover every split
+        unsafe {
+            let mut edge: NodePtr<K, V> = ptr::null_mut();
+            // leaves never move, so the slot found at the leaf level stays valid
+            let mut slot: *mut V = ptr::null_mut();
+            loop {
+                if node::len(node) < CAPACITY {
+                    node::insert_fit(node, idx, key, value, edge);
+                    return if slot.is_null() { node::val(node, idx) } else { slot };
+                }
+                let internal = !edge.is_null();
+                let right = if internal { pop(&mut spare_internals) } else { spare_leaf };
+                // both halves keep at least MIN_LEN pairs after the insert
+                let (mid, into_right, at) = if idx < B - 1 {
+                    (B - 2, false, idx)
+                } else if idx == B - 1 {
+                    (B - 1, false, idx)
+                } else if idx == B {
+                    (B - 1, true, 0)
+                } else {
+                    (B, true, idx - B - 1)
+                };
+                let (mid_key, mid_value) = node::split(node, mid, right, internal);
+                let target = if into_right { right } else { node };
+                node::insert_fit(target, at, key, value, edge);
+                if slot.is_null() {
+                    slot = node::val(target, at);
+                }
+                let parent = node::parent(node);
+                if parent.is_null() {
+                    let root = pop(&mut spare_internals);
+                    node::set_child(root, 0, node);
+                    node::insert_fit(root, 0, mid_key, mid_value, right);
+                    self.root = root;
+                    self.height += 1;
+                    return slot;
+                }
+                idx = node::parent_idx(node);
+                node = parent;
+                (key, value, edge) = (mid_key, mid_value, right);
             }
-            let internal = !edge.is_null();
-            let right = if internal { pop(&mut spare_internals) } else { spare_leaf };
-            // both halves keep at least MIN_LEN pairs after the insert
-            let (mid, into_right, at) = if idx < B - 1 {
-                (B - 2, false, idx)
-            } else if idx == B - 1 {
-                (B - 1, false, idx)
-            } else if idx == B {
-                (B - 1, true, 0)
-            } else {
-                (B, true, idx - B - 1)
-            };
-            let (mid_key, mid_value) = node::split(node, mid, right, internal);
-            let target = if into_right { right } else { node };
-            node::insert_fit(target, at, key, value, edge);
-            if slot.is_null() {
-                slot = node::val(target, at);
-            }
-            let parent = node::parent(node);
-            if parent.is_null() {
-                let root = pop(&mut spare_internals);
-                node::set_child(root, 0, node);
-                node::insert_fit(root, 0, mid_key, mid_value, right);
-                self.root = root;
-                self.height += 1;
-                return slot;
-            }
-            idx = node::parent_idx(node);
-            node = parent;
-            (key, value, edge) = (mid_key, mid_value, right);
         }
     }
 }
@@ -462,36 +537,42 @@ impl<K: Ord, V, A: RawAlloc> BTreeMap<K, V, A> {
 /// per full ancestor that splits, and one for a new root if all of them are full.
 /// The internal nodes are chained through `parent`. On failure frees them all.
 #[allow(clippy::type_complexity)]
-unsafe fn reserve<K, V, A: RawAlloc>(alloc: &A, leaf: NodePtr<K, V>) -> Result<(NodePtr<K, V>, NodePtr<K, V>), AllocError> {
-    let mut internals: NodePtr<K, V> = ptr::null_mut();
-    if node::len(leaf) < CAPACITY {
-        return Ok((ptr::null_mut(), internals));
-    }
-    let spare_leaf = node::new_node(alloc, false);
-    if spare_leaf.is_null() {
-        return Err(AllocError);
-    }
-    // `node` is full, so it splits and pushes a pair up
-    let mut node = leaf;
-    loop {
-        let parent = node::parent(node);
-        if !parent.is_null() && node::len(parent) < CAPACITY {
-            return Ok((spare_leaf, internals));
+unsafe fn reserve<K, V, A: RawAlloc>(
+    alloc: &A,
+    leaf: NodePtr<K, V>,
+) -> Result<(NodePtr<K, V>, NodePtr<K, V>), AllocError> {
+    // SAFETY: `leaf` is a live leaf of the map this allocator serves
+    unsafe {
+        let mut internals: NodePtr<K, V> = ptr::null_mut();
+        if node::len(leaf) < CAPACITY {
+            return Ok((ptr::null_mut(), internals));
         }
-        let spare = node::new_node(alloc, true);
-        if spare.is_null() {
-            while !internals.is_null() {
-                node::free_node(alloc, pop(&mut internals), true);
-            }
-            node::free_node(alloc, spare_leaf, false);
+        let spare_leaf = node::new_node(alloc, false);
+        if spare_leaf.is_null() {
             return Err(AllocError);
         }
-        (*spare).parent = internals;
-        internals = spare;
-        if parent.is_null() {
-            return Ok((spare_leaf, internals));
+        // `node` is full, so it splits and pushes a pair up
+        let mut node = leaf;
+        loop {
+            let parent = node::parent(node);
+            if !parent.is_null() && node::len(parent) < CAPACITY {
+                return Ok((spare_leaf, internals));
+            }
+            let spare = node::new_node(alloc, true);
+            if spare.is_null() {
+                while !internals.is_null() {
+                    node::free_node(alloc, pop(&mut internals), true);
+                }
+                node::free_node(alloc, spare_leaf, false);
+                return Err(AllocError);
+            }
+            (*spare).parent = internals;
+            internals = spare;
+            if parent.is_null() {
+                return Ok((spare_leaf, internals));
+            }
+            node = parent;
         }
-        node = parent;
     }
 }
 
@@ -507,11 +588,14 @@ fn before<Q: ?Sized + Ord>(key: &Q, bound: Bound<&Q>, upper: bool) -> bool {
 }
 
 unsafe fn pop<K, V>(chain: &mut NodePtr<K, V>) -> NodePtr<K, V> {
-    let node = *chain;
-    debug_assert!(!node.is_null());
-    *chain = node::parent(node);
-    (*node).parent = ptr::null();
-    node
+    // SAFETY: `chain` holds only live reserved nodes, linked through `parent`
+    unsafe {
+        let node = *chain;
+        debug_assert!(!node.is_null());
+        *chain = node::parent(node);
+        (*node).parent = ptr::null();
+        node
+    }
 }
 
 impl<K, V, A: RawAlloc> BTreeMap<K, V, A> {
@@ -520,18 +604,22 @@ impl<K, V, A: RawAlloc> BTreeMap<K, V, A> {
         Iter::new(self)
     }
 
+    /// Iterates mutably in ascending key order.
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
         IterMut::new(self)
     }
 
+    /// Iterates over the keys in ascending order.
     pub fn keys(&self) -> Keys<'_, K, V> {
         Keys(self.iter())
     }
 
+    /// Iterates over the values in ascending key order.
     pub fn values(&self) -> Values<'_, K, V> {
         Values(self.iter())
     }
 
+    /// Iterates mutably over the values in ascending key order.
     pub fn values_mut(&mut self) -> ValuesMut<'_, K, V> {
         ValuesMut(self.iter_mut())
     }
@@ -571,60 +659,66 @@ impl<K, V, A: RawAlloc> BTreeMap<K, V, A> {
 
     /// Removes the pair at `pos`. Never allocates and calls no user code.
     pub(crate) unsafe fn remove_at(&mut self, pos: Pos<K, V>) -> (K, V) {
-        let Pos { node, idx, height } = pos;
-        let node = node.cast_mut();
-        // a non-root leaf is never empty
-        let (leaf, kv) = if height == 0 {
-            (node, node::remove_leaf_kv(node, idx))
-        } else {
-            // swap with the predecessor: the last pair of the left subtree
-            let leaf = last_leaf(node::child(node, idx), height - 1);
-            let (k, v) = node::remove_leaf_kv(leaf, node::len(leaf) - 1);
-            (leaf, (ptr::replace(node::key(node, idx), k), ptr::replace(node::val(node, idx), v)))
-        };
-        self.rebalance(leaf);
-        self.len -= 1;
-        kv
+        // SAFETY: `pos` is a live pair of this map
+        unsafe {
+            let Pos { node, idx, height } = pos;
+            let node = node.cast_mut();
+            // a non-root leaf is never empty
+            let (leaf, kv) = if height == 0 {
+                (node, node::remove_leaf_kv(node, idx))
+            } else {
+                // swap with the predecessor: the last pair of the left subtree
+                let leaf = last_leaf(node::child(node, idx), height - 1);
+                let (k, v) = node::remove_leaf_kv(leaf, node::len(leaf) - 1);
+                (leaf, (ptr::replace(node::key(node, idx), k), ptr::replace(node::val(node, idx), v)))
+            };
+            self.rebalance(leaf);
+            self.len -= 1;
+            kv
+        }
     }
 
     /// Restores minimum occupancy from `node` (a leaf that just lost a pair) upwards.
     unsafe fn rebalance(&mut self, mut node: NodePtr<K, V>) {
-        let mut height = 0;
-        loop {
-            let len = node::len(node);
-            let parent = node::parent(node);
-            if parent.is_null() {
-                if len == 0 {
-                    if height == 0 {
-                        self.root = ptr::null();
-                    } else {
-                        let child = node::child(node, 0);
-                        (*child).parent = ptr::null();
-                        self.root = child;
-                        self.height -= 1;
+        // SAFETY: `node` is a live node of this tree that may be below `MIN_LEN`
+        unsafe {
+            let mut height = 0;
+            loop {
+                let len = node::len(node);
+                let parent = node::parent(node);
+                if parent.is_null() {
+                    if len == 0 {
+                        if height == 0 {
+                            self.root = ptr::null();
+                        } else {
+                            let child = node::child(node, 0);
+                            (*child).parent = ptr::null();
+                            self.root = child;
+                            self.height -= 1;
+                        }
+                        node::free_node(&self.alloc, node, height > 0);
                     }
-                    node::free_node(&self.alloc, node, height > 0);
+                    return;
                 }
-                return;
-            }
-            if len >= MIN_LEN {
-                return;
-            }
-            let idx = node::parent_idx(node);
-            let internal = height > 0;
-            if idx > 0 {
-                if node::len(node::child(parent, idx - 1)) > MIN_LEN {
-                    return node::steal_left(parent, idx, internal);
+                if len >= MIN_LEN {
+                    return;
                 }
-                node::merge(&self.alloc, parent, idx - 1, internal);
-            } else {
-                if node::len(node::child(parent, 1)) > MIN_LEN {
-                    return node::steal_right(parent, 0, internal);
+                let idx = node::parent_idx(node);
+                let internal = height > 0;
+                if idx > 0 {
+                    if node::len(node::child(parent, idx - 1)) > MIN_LEN {
+                        return node::steal_left(parent, idx, internal);
+                    }
+                    node::merge(&self.alloc, parent, idx - 1, internal);
+                } else {
+                    if node::len(node::child(parent, 1)) > MIN_LEN {
+                        return node::steal_right(parent, 0, internal);
+                    }
+                    node::merge(&self.alloc, parent, 0, internal);
                 }
-                node::merge(&self.alloc, parent, 0, internal);
+                node = parent;
+                height += 1;
             }
-            node = parent;
-            height += 1;
         }
     }
 

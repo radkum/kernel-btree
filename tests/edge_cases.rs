@@ -377,7 +377,8 @@ fn borrowed_lookups() {
     assert!(!map.contains_key("echo"));
     map.get_mut("alpha").unwrap().push(b'!');
     assert_eq!(map.get("alpha").unwrap(), b"alpha!");
-    let mid: Vec<&str> = map.range::<str, _>((Bound::Included("b"), Bound::Excluded("d"))).map(|(k, _)| k.as_str()).collect();
+    let mid: Vec<&str> =
+        map.range::<str, _>((Bound::Included("b"), Bound::Excluded("d"))).map(|(k, _)| k.as_str()).collect();
     assert_eq!(mid, ["bravo", "charlie"]);
     assert_eq!(map.remove("delta"), Some(b"delta".to_vec()));
     assert_eq!(map.remove("delta"), None);

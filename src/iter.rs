@@ -23,68 +23,88 @@ impl<K, V> Copy for Pos<K, V> {}
 
 impl<K, V> Pos<K, V> {
     pub(crate) unsafe fn kv<'a>(self) -> (&'a K, &'a V) {
-        (&*node::key(self.node.cast_mut(), self.idx), &*node::val(self.node.cast_mut(), self.idx))
+        // SAFETY: the caller keeps the pair live for `'a`
+        unsafe { (&*node::key(self.node.cast_mut(), self.idx), &*node::val(self.node.cast_mut(), self.idx)) }
     }
 
     pub(crate) unsafe fn kv_mut<'a>(self) -> (&'a K, &'a mut V) {
-        (&*node::key(self.node.cast_mut(), self.idx), &mut *node::val(self.node.cast_mut(), self.idx))
+        // SAFETY: the caller keeps the pair live and exclusively borrowed for `'a`
+        unsafe { (&*node::key(self.node.cast_mut(), self.idx), &mut *node::val(self.node.cast_mut(), self.idx)) }
     }
 }
 
 pub(crate) unsafe fn first_leaf<K, V>(mut node: NodePtr<K, V>, height: usize) -> NodePtr<K, V> {
-    for _ in 0..height {
-        node = node::child(node, 0);
+    // SAFETY: the caller guarantees `node` is live at `height`
+    unsafe {
+        for _ in 0..height {
+            node = node::child(node, 0);
+        }
+        node
     }
-    node
 }
 
 pub(crate) unsafe fn last_leaf<K, V>(mut node: NodePtr<K, V>, height: usize) -> NodePtr<K, V> {
-    for _ in 0..height {
-        node = node::child(node, node::len(node));
+    // SAFETY: the caller guarantees `node` is live at `height`
+    unsafe {
+        for _ in 0..height {
+            node = node::child(node, node::len(node));
+        }
+        node
     }
-    node
 }
 
 /// The first pair after leaf edge `idx` of `node`, if any.
 pub(crate) unsafe fn next_kv<K, V>(mut node: NodePtr<K, V>, mut idx: usize) -> Option<Pos<K, V>> {
-    let mut height = 0;
-    while idx >= node::len(node) {
-        let parent = node::parent(node);
-        if parent.is_null() {
-            return None;
+    // SAFETY: the caller guarantees `node` is live and `idx` is a valid edge
+    unsafe {
+        let mut height = 0;
+        while idx >= node::len(node) {
+            let parent = node::parent(node);
+            if parent.is_null() {
+                return None;
+            }
+            (node, idx, height) = (parent, node::parent_idx(node), height + 1);
         }
-        (node, idx, height) = (parent, node::parent_idx(node), height + 1);
+        Some(Pos { node, idx, height })
     }
-    Some(Pos { node, idx, height })
 }
 
 /// The last pair before leaf edge `idx` of `node`, if any.
 pub(crate) unsafe fn prev_kv<K, V>(mut node: NodePtr<K, V>, mut idx: usize) -> Option<Pos<K, V>> {
-    let mut height = 0;
-    while idx == 0 {
-        let parent = node::parent(node);
-        if parent.is_null() {
-            return None;
+    // SAFETY: the caller guarantees `node` is live and `idx` is a valid edge
+    unsafe {
+        let mut height = 0;
+        while idx == 0 {
+            let parent = node::parent(node);
+            if parent.is_null() {
+                return None;
+            }
+            (node, idx, height) = (parent, node::parent_idx(node), height + 1);
         }
-        (node, idx, height) = (parent, node::parent_idx(node), height + 1);
+        Some(Pos { node, idx: idx - 1, height })
     }
-    Some(Pos { node, idx: idx - 1, height })
 }
 
 pub(crate) unsafe fn successor<K, V>(pos: Pos<K, V>) -> Option<Pos<K, V>> {
-    if pos.height == 0 {
-        next_kv(pos.node.cast_mut(), pos.idx + 1)
-    } else {
-        next_kv(first_leaf(node::child(pos.node.cast_mut(), pos.idx + 1), pos.height - 1), 0)
+    // SAFETY: `pos` is live and `idx + 1` is a valid edge
+    unsafe {
+        if pos.height == 0 {
+            next_kv(pos.node.cast_mut(), pos.idx + 1)
+        } else {
+            next_kv(first_leaf(node::child(pos.node.cast_mut(), pos.idx + 1), pos.height - 1), 0)
+        }
     }
 }
 
 unsafe fn predecessor<K, V>(pos: Pos<K, V>) -> Option<Pos<K, V>> {
-    if pos.height == 0 {
-        prev_kv(pos.node.cast_mut(), pos.idx)
-    } else {
-        let leaf = last_leaf(node::child(pos.node.cast_mut(), pos.idx), pos.height - 1);
-        prev_kv(leaf, node::len(leaf))
+    // SAFETY: `pos` is live and `idx` is a valid edge
+    unsafe {
+        if pos.height == 0 {
+            prev_kv(pos.node.cast_mut(), pos.idx)
+        } else {
+            let leaf = last_leaf(node::child(pos.node.cast_mut(), pos.idx), pos.height - 1);
+            prev_kv(leaf, node::len(leaf))
+        }
     }
 }
 
@@ -100,17 +120,23 @@ impl<K, V> Raw<K, V> {
 
     // stops at the end of the tree even if `back` is never met (inconsistent `Ord`)
     unsafe fn next(&mut self) -> Option<Pos<K, V>> {
-        let (front, back) = self.range?;
-        let last = front.node == back.node && front.idx == back.idx;
-        self.range = if last { None } else { successor(front).map(|front| (front, back)) };
-        Some(front)
+        // SAFETY: both ends of `range` are live pairs of the borrowed map
+        unsafe {
+            let (front, back) = self.range?;
+            let last = front.node == back.node && front.idx == back.idx;
+            self.range = if last { None } else { successor(front).map(|front| (front, back)) };
+            Some(front)
+        }
     }
 
     unsafe fn next_back(&mut self) -> Option<Pos<K, V>> {
-        let (front, back) = self.range?;
-        let last = front.node == back.node && front.idx == back.idx;
-        self.range = if last { None } else { predecessor(back).map(|back| (front, back)) };
-        Some(back)
+        // SAFETY: both ends of `range` are live pairs of the borrowed map
+        unsafe {
+            let (front, back) = self.range?;
+            let last = front.node == back.node && front.idx == back.idx;
+            self.range = if last { None } else { predecessor(back).map(|back| (front, back)) };
+            Some(back)
+        }
     }
 }
 
@@ -120,6 +146,7 @@ impl<K, V, A: RawAlloc> BTreeMap<K, V, A> {
     }
 }
 
+/// An iterator over a range of pairs; created by [`BTreeMap::range`].
 pub struct Range<'a, K, V> {
     raw: Raw<K, V>,
     _marker: PhantomData<&'a (K, V)>,
@@ -133,6 +160,7 @@ impl<K, V> Range<'_, K, V> {
 
 // SAFETY: behaves like `&BTreeMap`
 unsafe impl<K: Sync, V: Sync> Send for Range<'_, K, V> {}
+// SAFETY: behaves like `&BTreeMap`
 unsafe impl<K: Sync, V: Sync> Sync for Range<'_, K, V> {}
 
 impl<'a, K, V> Iterator for Range<'a, K, V> {
@@ -151,6 +179,7 @@ impl<K, V> DoubleEndedIterator for Range<'_, K, V> {
     }
 }
 
+/// A mutable iterator over a range of pairs; created by [`BTreeMap::range_mut`].
 pub struct RangeMut<'a, K, V> {
     raw: Raw<K, V>,
     _marker: PhantomData<&'a mut (K, V)>,
@@ -164,6 +193,7 @@ impl<K, V> RangeMut<'_, K, V> {
 
 // SAFETY: behaves like `&mut BTreeMap` that hands out `&K` and `&mut V`
 unsafe impl<K: Sync, V: Send> Send for RangeMut<'_, K, V> {}
+// SAFETY: hands out `&K` and `&mut V` only through `&mut self`
 unsafe impl<K: Sync, V: Sync> Sync for RangeMut<'_, K, V> {}
 
 impl<'a, K, V> Iterator for RangeMut<'a, K, V> {
@@ -182,6 +212,7 @@ impl<K, V> DoubleEndedIterator for RangeMut<'_, K, V> {
     }
 }
 
+/// An iterator over all pairs; created by [`BTreeMap::iter`].
 pub struct Iter<'a, K, V> {
     range: Range<'a, K, V>,
     remaining: usize,
@@ -217,6 +248,7 @@ impl<K, V> DoubleEndedIterator for Iter<'_, K, V> {
 
 impl<K, V> ExactSizeIterator for Iter<'_, K, V> {}
 
+/// A mutable iterator over all pairs; created by [`BTreeMap::iter_mut`].
 pub struct IterMut<'a, K, V> {
     range: RangeMut<'a, K, V>,
     remaining: usize,
@@ -252,6 +284,7 @@ impl<K, V> DoubleEndedIterator for IterMut<'_, K, V> {
 
 impl<K, V> ExactSizeIterator for IterMut<'_, K, V> {}
 
+/// An iterator over the keys; created by [`BTreeMap::keys`].
 pub struct Keys<'a, K, V>(pub(crate) Iter<'a, K, V>);
 
 impl<'a, K, V> Iterator for Keys<'a, K, V> {
@@ -274,6 +307,7 @@ impl<K, V> DoubleEndedIterator for Keys<'_, K, V> {
 
 impl<K, V> ExactSizeIterator for Keys<'_, K, V> {}
 
+/// An iterator over the values; created by [`BTreeMap::values`].
 pub struct Values<'a, K, V>(pub(crate) Iter<'a, K, V>);
 
 impl<'a, K, V> Iterator for Values<'a, K, V> {
@@ -296,6 +330,7 @@ impl<K, V> DoubleEndedIterator for Values<'_, K, V> {
 
 impl<K, V> ExactSizeIterator for Values<'_, K, V> {}
 
+/// A mutable iterator over the values; created by [`BTreeMap::values_mut`].
 pub struct ValuesMut<'a, K, V>(pub(crate) IterMut<'a, K, V>);
 
 impl<'a, K, V> Iterator for ValuesMut<'a, K, V> {

@@ -5,7 +5,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use kernel_btree::{BTreeMap, RawAlloc};
 
@@ -131,11 +131,14 @@ fn filled(tracker: &Tracker, n: u32) -> BTreeMap<Key, Tracked, &Tracker> {
 fn assert_contents(map: &BTreeMap<Key, Tracked, &Tracker>, keys: impl Iterator<Item = u32>) {
     CMP_BUDGET.set(usize::MAX);
     map.check_invariants();
-    assert!(map.iter().map(|(k, v)| {
-        assert_eq!(k.0, v.0);
-        k.0
-    })
-    .eq(keys));
+    assert!(
+        map.iter()
+            .map(|(k, v)| {
+                assert_eq!(k.0, v.0);
+                k.0
+            })
+            .eq(keys)
+    );
 }
 
 fn quiet<R>(f: impl FnOnce() -> R) -> std::thread::Result<R> {

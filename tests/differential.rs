@@ -23,11 +23,7 @@ enum Op {
 }
 
 fn bound() -> impl Strategy<Value = Bound<u16>> {
-    prop_oneof![
-        (0..520u16).prop_map(Bound::Included),
-        (0..520u16).prop_map(Bound::Excluded),
-        Just(Bound::Unbounded),
-    ]
+    prop_oneof![(0..520u16).prop_map(Bound::Included), (0..520u16).prop_map(Bound::Excluded), Just(Bound::Unbounded),]
 }
 
 fn op() -> impl Strategy<Value = Op> {

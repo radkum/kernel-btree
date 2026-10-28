@@ -4,8 +4,21 @@ use core::borrow::Borrow;
 use core::fmt;
 use core::ops::RangeBounds;
 
-use crate::{iter, AllocError, BTreeMap, Global, RawAlloc};
+use crate::{AllocError, BTreeMap, Global, RawAlloc, iter};
 
+/// An ordered set backed by a [`BTreeMap`] with `()` values.
+///
+/// It has the same allocation guarantees: every allocating operation is fallible.
+///
+/// ```
+/// use kernel_btree::BTreeSet;
+///
+/// let mut set = BTreeSet::new();
+/// assert!(set.try_insert(2).is_ok());
+/// assert!(set.try_insert(1).is_ok());
+/// assert!(set.try_insert(2).is_ok());
+/// assert_eq!(set.iter().copied().collect::<Vec<_>>(), [1, 2]);
+/// ```
 pub struct BTreeSet<T, A: RawAlloc = Global> {
     map: BTreeMap<T, (), A>,
 }
@@ -23,14 +36,17 @@ impl<T: Ord, A: RawAlloc> BTreeSet<T, A> {
         Self { map: BTreeMap::new_in(alloc) }
     }
 
+    /// Returns the number of values.
     pub fn len(&self) -> usize {
         self.map.len()
     }
 
+    /// Returns `true` if the set contains no values.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
+    /// Returns `true` if the set contains `value`.
     pub fn contains<Q: ?Sized + Ord>(&self, value: &Q) -> bool
     where
         T: Borrow<Q>,
@@ -51,30 +67,37 @@ impl<T: Ord, A: RawAlloc> BTreeSet<T, A> {
         self.map.remove(value).is_some()
     }
 
+    /// Returns the smallest value.
     pub fn first(&self) -> Option<&T> {
         self.map.first_key_value().map(|(k, _)| k)
     }
 
+    /// Returns the largest value.
     pub fn last(&self) -> Option<&T> {
         self.map.last_key_value().map(|(k, _)| k)
     }
 
+    /// Removes and returns the smallest value. Never allocates.
     pub fn pop_first(&mut self) -> Option<T> {
         self.map.pop_first().map(|(k, _)| k)
     }
 
+    /// Removes and returns the largest value. Never allocates.
     pub fn pop_last(&mut self) -> Option<T> {
         self.map.pop_last().map(|(k, _)| k)
     }
 
+    /// Removes all values and frees the memory.
     pub fn clear(&mut self) {
         self.map.clear();
     }
 
+    /// Keeps only the values for which `f` returns `true`. Never allocates.
     pub fn retain<F: FnMut(&T) -> bool>(&mut self, mut f: F) {
         self.map.retain(|k, _| f(k));
     }
 
+    /// Iterates over the values in `range`. An empty or inverted range yields nothing.
     pub fn range<Q: ?Sized + Ord, R: RangeBounds<Q>>(&self, range: R) -> Range<'_, T>
     where
         T: Borrow<Q>,
@@ -82,6 +105,7 @@ impl<T: Ord, A: RawAlloc> BTreeSet<T, A> {
         Range(self.map.range(range))
     }
 
+    /// Clones the set. On `Err` the partial copy is freed; `self` is untouched.
     pub fn try_clone(&self) -> Result<Self, AllocError>
     where
         T: Clone,
@@ -116,6 +140,7 @@ impl<T: fmt::Debug, A: RawAlloc> fmt::Debug for BTreeSet<T, A> {
     }
 }
 
+/// An iterator over the values; created by [`BTreeSet::iter`].
 pub struct Iter<'a, T>(iter::Keys<'a, T, ()>);
 
 impl<'a, T> Iterator for Iter<'a, T> {
@@ -138,6 +163,7 @@ impl<T> DoubleEndedIterator for Iter<'_, T> {
 
 impl<T> ExactSizeIterator for Iter<'_, T> {}
 
+/// An iterator over a range of values; created by [`BTreeSet::range`].
 pub struct Range<'a, T>(iter::Range<'a, T, ()>);
 
 impl<'a, T> Iterator for Range<'a, T> {
@@ -154,6 +180,7 @@ impl<T> DoubleEndedIterator for Range<'_, T> {
     }
 }
 
+/// An owning iterator over the values; created by `IntoIterator`.
 pub struct IntoIter<T, A: RawAlloc = Global>(iter::IntoIter<T, (), A>);
 
 impl<T, A: RawAlloc> Iterator for IntoIter<T, A> {

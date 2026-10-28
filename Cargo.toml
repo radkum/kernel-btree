@@ -1,14 +1,18 @@
 [package]
 name = "kernel-btree"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 description = "Ordered map for no_std that never panics or aborts on allocation failure: atomic try_insert, allocation-free remove, builds with no_global_oom_handling."
 keywords = ["btree", "fallible", "no-std", "kernel", "allocation"]
 categories = ["data-structures", "no-std", "memory-management"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/radkum/kernel-btree"
-# not on crates.io yet
-publish = false
+readme = "README.md"
+exclude = [".github/", "CLAUDE.md", "PLAN.md", "scripts/"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 # BTreeMap::check_invariants, for tests
@@ -19,3 +23,19 @@ debug-invariants = []
 [dev-dependencies]
 proptest = "1"
 kernel-btree = { path = ".", features = ["debug-invariants"] }
+
+[[test]]
+name = "differential"
+required-features = ["debug-invariants"]
+
+[[test]]
+name = "edge_cases"
+required-features = ["debug-invariants"]
+
+[[test]]
+name = "fault_injection"
+required-features = ["debug-invariants"]
+
+[[test]]
+name = "panic_safety"
+required-features = ["debug-invariants"]

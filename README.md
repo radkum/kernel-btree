@@ -1,5 +1,9 @@
 # kernel-btree
 
+[![CI](https://github.com/radkum/kernel-btree/actions/workflows/ci.yml/badge.svg)](https://github.com/radkum/kernel-btree/actions/workflows/ci.yml)
+[![docs.rs](https://docs.rs/kernel-btree/badge.svg)](https://docs.rs/kernel-btree)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](#status)
+
 Ordered map and set for `no_std` that **never panic or abort on allocation failure**.
 Written for a Windows kernel driver, where a panic is a bugcheck (BSOD).
 
@@ -12,9 +16,18 @@ Written for a Windows kernel driver, where a panic is a bugcheck (BSOD).
   cannot sneak in.
 - No recursion (small kernel stacks).
 
+## Install
+
+```toml
+[dependencies]
+kernel-btree = "0.1"
+```
+
+The crate is `no_std` and has no dependencies.
+
 ## Example (kernel driver)
 
-```rust
+```rust,ignore
 #![no_std]
 extern crate alloc;
 
@@ -43,7 +56,7 @@ impl Sessions {
 Each map can take its own node allocator, e.g. a separate pool for code running at
 `DISPATCH_LEVEL`. `RawAlloc` works on stable and has no dependencies:
 
-```rust
+```rust,ignore
 use core::alloc::Layout;
 use kernel_btree::{BTreeMap, RawAlloc};
 
@@ -105,16 +118,21 @@ map with its previous state.
 ## Testing
 
 ```powershell
-cargo test                 # unit + differential (proptest vs std) + fault injection
+cargo test --all-features  # unit + differential (proptest vs std) + fault injection
 scripts\ci.ps1             # the above + clippy + no_global_oom_handling build + Miri
 cargo run --release --example bench
 ```
+
+The same checks run on GitHub Actions (see
+[`.github/workflows/ci.yml`](https://github.com/radkum/kernel-btree/blob/main/.github/workflows/ci.yml)),
+together with `rustfmt`, rustdoc warnings, MSRV 1.85 and a `no_std` target build.
 
 On 1 M random `u64` keys the timings are on par with `std::collections::BTreeMap`.
 
 ## Status
 
-Not on crates.io yet.
+Version 0.1.0, edition 2024, MSRV 1.85. See
+[CHANGELOG.md](https://github.com/radkum/kernel-btree/blob/main/CHANGELOG.md).
 
 ## License
 
