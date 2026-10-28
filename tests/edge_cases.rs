@@ -538,7 +538,7 @@ fn into_iter_both_ends_and_partial_drop() {
         assert_eq!(it.len(), n as usize);
         if n > 0 {
             assert_eq!(it.next_back(), Some((n - 1, (n - 1).to_string())));
-            assert_eq!(it.next().map(|(k, _)| k), Some(0).filter(|_| n > 1));
+            assert_eq!(it.next().map(|(k, _)| k), (n > 1).then_some(0));
         }
         assert_eq!(it.size_hint().0, n.saturating_sub(2) as usize);
         drop(it);
